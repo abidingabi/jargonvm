@@ -7,6 +7,8 @@ pub struct ClassFile {
     major_version: u16,
     constant_pool: Vec<Constant>,
     access_flags: AccessFlags,
+    this_class: u16,
+    super_class: u16,
 }
 
 // see section 4.1 of the spec
@@ -33,11 +35,16 @@ pub fn parse_class_file<T: std::io::Read>(reader: &mut T) -> std::io::Result<Cla
 
     // TODO: the appropriate checks at the end of 4.1 of the spec for modules
 
+    let this_class = parse_u16(reader)?;
+    let super_class = parse_u16(reader)?;
+
     Ok(ClassFile {
         minor_version,
         major_version,
         constant_pool,
         access_flags,
+        this_class,
+        super_class,
     })
 }
 
