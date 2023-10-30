@@ -6,6 +6,7 @@ pub struct ClassFile {
     minor_version: u16,
     major_version: u16,
     constant_pool: Vec<Constant>,
+    access_flags: AccessFlags,
 }
 
 // see section 4.1 of the spec
@@ -18,16 +19,25 @@ pub fn parse_class_file<T: std::io::Read>(reader: &mut T) -> std::io::Result<Cla
     let minor_version = parse_u16(reader)?;
     let major_version = parse_u16(reader)?;
 
-    let constant_pool_count = parse_u16(reader)?;
-    let mut constant_pool = Vec::with_capacity(constant_pool_count.into());
-    for _ in 1..constant_pool_count {
-        constant_pool.push(parse_constant(reader)?);
-    }
+    let constant_pool = {
+        let constant_pool_count = parse_u16(reader)?;
+        let mut constant_pool = Vec::with_capacity(constant_pool_count.into());
+        for _ in 1..constant_pool_count {
+            constant_pool.push(parse_constant(reader)?);
+        }
+
+        constant_pool
+    };
+
+    let access_flags: AccessFlags = parse_u16(reader)?.try_into()?;
+
+    // TODO: the appropriate checks at the end of 4.1 of the spec for modules
 
     Ok(ClassFile {
         minor_version,
         major_version,
         constant_pool,
+        access_flags,
     })
 }
 
@@ -315,6 +325,78 @@ fn parse_utf8<T: std::io::Read>(reader: &mut T) -> std::io::Result<String> {
 
     result.shrink_to_fit();
     Ok(result)
+}
+
+#[derive(Debug)]
+pub struct AccessFlags {
+    // class declared public
+    is_public: bool,
+    // class declared final
+    is_final: bool,
+    // treat superclass methods specially when invoked by invokespecial
+    treat_superclass_special: bool,
+    // is an interface
+    is_interface: bool,
+    // is abstract; must not be instantiated
+    is_abstract: bool,
+    // not present in source code
+    is_synthetic: bool,
+    // is an annotation interface
+    is_annotation: bool,
+    // is an enum class
+    is_enum: bool,
+    // is a module, not a class or interface
+    is_module: bool,
+}
+
+impl TryFrom<u16> for AccessFlags {
+    type Error = Error;
+
+    fn try_from(mask: u16) -> Result<Self, Self::Error> {
+        let flags = AccessFlags {
+            is_public: mask & 0x0001 != 0,
+            is_final: mask & 0x0010 != 0,
+            treat_superclass_special: mask & 0x0020 != 0,
+            is_interface: mask & 0x0200 != 0,
+            is_abstract: mask & 0x0400 != 0,
+            is_synthetic: mask & 0x1000 != 0,
+            is_annotation: mask & 0x2000 != 0,
+            is_enum: mask & 0x4000 != 0,
+            is_module: mask & 0x8000 != 0,
+        };
+
+        // check that the access flags are valid
+
+        // for an interface, is_abstract is required,
+        // and a whole bunch of flags are not allowed
+        if flags.is_interface
+            && (!flags.is_abstract
+                || flags.is_final
+                || flags.treat_superclass_special
+                || flags.is_enum
+                || flags.is_module)
+        {
+            return make_parse_err("Illegal set of access flags for an interface!");
+        } else if !flags.is_interface && flags.is_final && flags.is_abstract {
+            return make_parse_err(
+                "Illegal set of access flags! Classes cannot be both abstract and final.",
+            );
+        } else if flags.is_module
+            && (flags.is_public
+                || flags.is_final
+                || flags.treat_superclass_special
+                || flags.is_interface
+                || flags.is_synthetic
+                || flags.is_annotation
+                || flags.is_enum)
+        {
+            return make_parse_err(
+                "Illegal set of access flags! Modules may not have any other access flags set.",
+            );
+        }
+
+        Ok(flags)
+    }
 }
 
 fn parse_u32<T: std::io::Read>(reader: &mut T) -> std::io::Result<u32> {
