@@ -23,7 +23,8 @@ pub fn parse_class_file<T: std::io::Read>(reader: &mut T) -> std::io::Result<Cla
 
     let constant_pool = {
         let constant_pool_count = parse_u16(reader)?;
-        let mut constant_pool = Vec::with_capacity(constant_pool_count.into());
+        // constant pool count is 1 plus the number of constants
+        let mut constant_pool = Vec::with_capacity((constant_pool_count - 1).into());
         for _ in 1..constant_pool_count {
             constant_pool.push(parse_constant(reader)?);
         }
