@@ -9,6 +9,7 @@ pub struct ClassFile {
     access_flags: AccessFlags,
     this_class: u16,
     super_class: u16,
+    interfaces: Vec<u16>,
 }
 
 // see section 4.1 of the spec
@@ -39,6 +40,16 @@ pub fn parse_class_file<T: std::io::Read>(reader: &mut T) -> std::io::Result<Cla
     let this_class = parse_u16(reader)?;
     let super_class = parse_u16(reader)?;
 
+    let interfaces = {
+        let interface_count = parse_u16(reader)?;
+        let mut interfaces = Vec::with_capacity(interface_count.into());
+        for _ in 0..interface_count {
+            interfaces.push(parse_u16(reader)?);
+        }
+
+        interfaces
+    };
+
     Ok(ClassFile {
         minor_version,
         major_version,
@@ -46,6 +57,7 @@ pub fn parse_class_file<T: std::io::Read>(reader: &mut T) -> std::io::Result<Cla
         access_flags,
         this_class,
         super_class,
+        interfaces,
     })
 }
 
