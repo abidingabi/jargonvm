@@ -1,19 +1,21 @@
 use std::convert::{From, TryFrom};
-use std::io::{Error, ErrorKind};
+use std::io::{Error, ErrorKind, Read};
+use std::rc::Rc;
 
 #[derive(Debug)]
 pub struct ClassFile {
     minor_version: u16,
     major_version: u16,
     constant_pool: Vec<Constant>,
-    access_flags: AccessFlags,
+    access_flags: ClassAccessFlags,
     this_class: u16,
     super_class: u16,
     interfaces: Vec<u16>,
+    fields: Vec<Field>,
 }
 
 // see section 4.1 of the spec
-pub fn parse_class_file<T: std::io::Read>(reader: &mut T) -> std::io::Result<ClassFile> {
+pub fn parse_class_file<T: Read>(reader: &mut T) -> std::io::Result<ClassFile> {
     // check magic bytes
     if parse_u32(reader)? != 0xCAFEBABE {
         return make_parse_err("class file must start with 0xCAFEBABE");
@@ -33,7 +35,7 @@ pub fn parse_class_file<T: std::io::Read>(reader: &mut T) -> std::io::Result<Cla
         constant_pool
     };
 
-    let access_flags: AccessFlags = parse_u16(reader)?.try_into()?;
+    let access_flags: ClassAccessFlags = parse_u16(reader)?.try_into()?;
 
     // TODO: the appropriate checks at the end of 4.1 of the spec for modules
 
@@ -50,6 +52,16 @@ pub fn parse_class_file<T: std::io::Read>(reader: &mut T) -> std::io::Result<Cla
         interfaces
     };
 
+    let fields = {
+        let field_count = parse_u16(reader)?;
+        let mut fields = Vec::with_capacity(field_count.into());
+        for _ in 0..field_count {
+            fields.push(parse_field(reader, constant_pool)?);
+        }
+
+        fields
+    };
+
     Ok(ClassFile {
         minor_version,
         major_version,
@@ -58,6 +70,7 @@ pub fn parse_class_file<T: std::io::Read>(reader: &mut T) -> std::io::Result<Cla
         this_class,
         super_class,
         interfaces,
+        fields,
     })
 }
 
@@ -157,7 +170,7 @@ impl TryFrom<u8> for ReferenceKind {
     }
 }
 
-pub fn parse_constant<T: std::io::Read>(reader: &mut T) -> std::io::Result<Constant> {
+pub fn parse_constant<T: Read>(reader: &mut T) -> std::io::Result<Constant> {
     use Constant as C;
     use LoadableConstant as LC;
 
@@ -273,7 +286,7 @@ pub fn parse_constant<T: std::io::Read>(reader: &mut T) -> std::io::Result<Const
 // See section 4.4.7 of the spec
 // excerpt: "String content is encoded in modified UTF-8."
 // ohno.png
-fn parse_utf8<T: std::io::Read>(reader: &mut T) -> std::io::Result<String> {
+fn parse_utf8<T: Read>(reader: &mut T) -> std::io::Result<String> {
     let length = parse_u16(reader)?;
     // length does not necessarily correspond to the number of codepoints here,
     // but it is a decent estimate
@@ -348,7 +361,7 @@ fn parse_utf8<T: std::io::Read>(reader: &mut T) -> std::io::Result<String> {
 }
 
 #[derive(Debug)]
-pub struct AccessFlags {
+pub struct ClassAccessFlags {
     // class declared public
     is_public: bool,
     // class declared final
@@ -369,11 +382,11 @@ pub struct AccessFlags {
     is_module: bool,
 }
 
-impl TryFrom<u16> for AccessFlags {
+impl TryFrom<u16> for ClassAccessFlags {
     type Error = Error;
 
     fn try_from(mask: u16) -> Result<Self, Self::Error> {
-        let flags = AccessFlags {
+        let flags = ClassAccessFlags {
             is_public: mask & 0x0001 != 0,
             is_final: mask & 0x0010 != 0,
             treat_superclass_special: mask & 0x0020 != 0,
@@ -419,20 +432,261 @@ impl TryFrom<u16> for AccessFlags {
     }
 }
 
-fn parse_u32<T: std::io::Read>(reader: &mut T) -> std::io::Result<u32> {
+#[derive(Debug)]
+pub struct Field {
+    access_flags: FieldAccessFlags,
+    name_index: u16,
+    descriptor_index: u16,
+    attributes: Vec<Attribute>,
+}
+
+// See Table 4.5-A
+#[derive(Debug)]
+pub struct FieldAccessFlags {
+    // declared public
+    is_public: bool,
+    // declared private
+    is_private: bool,
+    // declared protected
+    is_protected: bool,
+    // declared static
+    is_static: bool,
+    // declared final
+    is_final: bool,
+    // declared volatile (cannot be cached)
+    is_volatile: bool,
+    // declared transient (not written or read by a persistent object manager)
+    is_transient: bool,
+    // declared synthetic (not present in source code)
+    is_synthetic: bool,
+    // declared as an element of an enum class
+    from_enum: bool,
+}
+
+impl TryFrom<u16> for FieldAccessFlags {
+    type Error = Error;
+
+    fn try_from(mask: u16) -> Result<Self, Self::Error> {
+        let flags = FieldAccessFlags {
+            is_public: mask & 0x0001 != 0,
+            is_private: mask & 0x0002 != 0,
+            is_protected: mask & 0x0004 != 0,
+            is_static: mask & 0x0008 != 0,
+            is_final: mask & 0x0010 != 0,
+            is_volatile: mask & 0x0040 != 0,
+            is_transient: mask & 0x0080 != 0,
+            is_synthetic: mask & 0x1000 != 0,
+            from_enum: mask & 0x4000 != 0,
+        };
+
+        // check that the access flags are valid
+
+        // at most one accessibility modifier can be set at once
+        if (flags.is_public as u8 + flags.is_private as u8 + flags.is_protected as u8) > 1 {
+            return make_parse_err(
+                "Only one accessibility modifier can be set on a field at once!",
+            );
+        } else if flags.is_final && flags.is_volatile {
+            return make_parse_err("Only one of final and volatile can be set for a field!");
+        }
+        // TODO: cover details around fields of interfaces
+
+        Ok(flags)
+    }
+}
+
+fn parse_field<T: Read>(reader: &mut T, constant_pool: Vec<Constant>) -> std::io::Result<Field> {
+    todo!()
+}
+
+// See section 4.7 of the spec
+// only the attributes which are:
+// "critical to correct interpretation of the class file by the JVM"
+#[derive(Debug)]
+enum Attribute {
+    ConstantValue {
+        constant_value_index: u16,
+    },
+    Code {
+        max_stack: u16,
+        max_locals: u16,
+        code: Vec<u8>,
+        exception_table: Vec<ExceptionHandler>,
+        attributes: Vec<Attribute>,
+    },
+    StackMapTable {
+        entries: Vec<StackMapFrame>,
+    },
+    BootstrapMethods {
+        methods: Vec<BootstrapMethod>,
+    },
+    NestHost {
+        // constant_pool entry at index must be a CONSTANT_Class_info
+        host_class_index: u16,
+    },
+    NestMembers {
+        // constant_pool entries at indices must be CONSTANT_Class_infos
+        classes: Vec<u16>,
+    },
+    PermittedSubclasses {
+        // constant_pool entries at indices must be CONSTANT_Class_infos
+        classes: Vec<u16>,
+    },
+}
+
+// See the Code_attribute struct in the spec
+#[derive(Debug)]
+struct ExceptionHandler {
+    // range of code for which the exception handler is active
+    actives_pcs: std::ops::Range<u16>,
+    // program counter for the handler (must be a valid index for code)
+    handler_pc: u16,
+    // If not None, an index into the constant_pool for what types this
+    // exception handler is valid for
+    catch_type: Option<u16>,
+}
+
+// See the StackMapTable_attribute struct in the spec
+#[derive(Debug)]
+enum StackMapFrame {
+    // tags: [0-63]
+    // this frame has exactly same locals as previous frame,
+    // operand stack is empty
+    SameFrame {
+        frame_type: u8,
+    },
+    // tags: [64-127]
+    // this frame has exactly same locals as previous frame,
+    // operand stack has one entry
+    SameLocals1StackItemFrame {
+        frame_type: u8,
+        stack: [VerificationTypeInfo; 1],
+    },
+    // tags: [128-246] are reserved
+
+    // tag: 247
+    // this frame has exactly same locals as previous frame,
+    // operand stack has one entry
+    SameLocals1StackItemFrameExtended {
+        offset_delta: u16,
+        frame_type: u8,
+        stack: [VerificationTypeInfo; 1],
+    },
+    // tags: [248-250]
+    // this frame has the same local variables as the previous frame,
+    // except for the last chopped variables
+    ChopFrame {
+        offset_delta: u16,
+        chopped: u8,
+    },
+    // tag: 251
+    // this frame has the same local variables as the previous frame,
+    // operand stack is empty
+    SameFrameExtended {
+        offset_delta: u16,
+    },
+    // tags: [252-254]
+    // this frame has the same locals as the previous frame,
+    // except that [1-3] additional locals are defined,
+    // operand stack is empty
+    AppendFrame {
+        offset_delta: u16,
+        additional_locals: Vec<VerificationTypeInfo>,
+    },
+    // tag: 255
+    FullFrame {
+        offset_delta: u16,
+        locals: Vec<VerificationTypeInfo>,
+        stack: Vec<VerificationTypeInfo>,
+    },
+}
+
+impl StackMapFrame {
+    fn offset_delta(&self) -> u16 {
+        use StackMapFrame::*;
+        match &self {
+            SameFrame { frame_type } => (*frame_type).into(),
+            SameLocals1StackItemFrame { frame_type, .. } => (frame_type - 64).into(),
+            SameLocals1StackItemFrameExtended { offset_delta, .. } => *offset_delta,
+            ChopFrame { offset_delta, .. } => *offset_delta,
+            SameFrameExtended { offset_delta } => *offset_delta,
+            AppendFrame { offset_delta, .. } => *offset_delta,
+            FullFrame { offset_delta, .. } => *offset_delta,
+        }
+    }
+}
+
+#[derive(Debug)]
+enum VerificationTypeInfo {
+    Top,
+    Integer,
+    Float,
+    Null,
+    UninitializedThis,
+    Object { constant_pool_index: u16 },
+    UninitializedVariable { index: u16 },
+    Long,
+    Double,
+}
+
+// See the BootstrapMethods_attribute struct in the spec
+#[derive(Debug)]
+struct BootstrapMethod {
+    method_ref: u16,
+    arguments: Rc<[u16]>,
+}
+
+fn parse_attribute<T: Read>(reader: &mut T, constant_pool: Vec<Constant>) -> std::io::Result<Option<Attribute>> {
+    let name_index = parse_u16(reader)?;
+    let name = match constant_pool.get(name_index.into()) {
+        Some(Constant::Utf8(str)) => { Ok(str) },
+        _ => { make_parse_err("attribute name_index points to non-string!") },
+    }?;
+
+    let attribute_length = parse_u32(reader)?;
+
+    Ok(match name.as_ref() {
+        "ConstantValue" => { Some(parse_constant_value(reader)?) },
+        "Code" => {},
+        "StackMapTable" => {},
+        "BootstrapMethods" => {},
+        "NestHost" => {},
+        "NestMembers" => {},
+        "PermittedSubclasses" => {},
+        _ => {
+            // advance the reader attribute_length bytes,
+            // so we skip over this attribute
+            // TODO: use Seek so this is less inefficient
+            reader.take(attribute_length.into());
+            None
+        }
+    })
+}
+
+fn parse_constant_value<T: Read>(reader: &mut T) -> std::io::Result<Attribute> {
+    Ok(Attribute::ConstantValue {
+        constant_value_index: parse_u16(reader)?
+    })
+}
+
+fn parse_code<T: Read>(reader: &mut T) -> std::io::Result<Attribute> {
+
+}
+
+fn parse_u32<T: Read>(reader: &mut T) -> std::io::Result<u32> {
     let mut buf = [0u8; 4];
     reader.read_exact(&mut buf)?;
     Ok(u32::from_be_bytes(buf))
 }
 
-fn parse_u16<T: std::io::Read>(reader: &mut T) -> std::io::Result<u16> {
+fn parse_u16<T: Read>(reader: &mut T) -> std::io::Result<u16> {
     let mut buf = [0u8; 2];
     reader.read_exact(&mut buf)?;
     Ok(u16::from_be_bytes(buf))
 }
 
 // this really should not count as parsing, but name consistency is useful
-fn parse_u8<T: std::io::Read>(reader: &mut T) -> std::io::Result<u8> {
+fn parse_u8<T: Read>(reader: &mut T) -> std::io::Result<u8> {
     let mut buf = [0u8; 1];
     reader.read_exact(&mut buf)?;
     Ok(buf[0])
